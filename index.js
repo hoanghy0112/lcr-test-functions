@@ -7,15 +7,27 @@ const express = require("express");
 const Busboy = require("busboy");
 const cors = require("cors");
 const { Storage } = require("@google-cloud/storage");
+const csv = require("csv-parser");
+const { Pool } = require("pg");
+
+const { defineString } = require("firebase-functions/params");
+const databaseURL = defineString("DATABASE_URL");
 
 admin.initializeApp();
 const app = express();
 const storage = new Storage();
 const bucket = storage.bucket("hy-lcr-test");
 
+const pool = new Pool({
+	connectionString: databaseURL.value(),
+	ssl: {
+		rejectUnauthorized: false,
+	},
+});
+
 app.use(cors()); // Default allows all origins (*)
-app.use(express.json({ limit: "600mb" }));
-app.use(express.urlencoded({ limit: "600mb", extended: true }));
+app.use(express.json({ limit: "2000mb" }));
+app.use(express.urlencoded({ limit: "2000mb", extended: true }));
 
 app.get("/get-signed-url", async (req, res) => {
 	try {
@@ -32,6 +44,42 @@ app.get("/get-signed-url", async (req, res) => {
 		res.json({ url });
 	} catch (error) {
 		res.status(500).json({ error });
+	}
+});
+
+app.post("/save-to-db", async (req, res) => {
+	try {
+		const fileName = req.query.fileName;
+		const file = bucket.file(fileName);
+
+		const stream = file.createReadStream();
+		const csvStream = csv();
+
+		const client = await pool.connect();
+
+		const results = [];
+
+		stream
+			.pipe(csvStream) // Parses CSV row by row
+			.on("data", (row) => {
+				results.push(row);
+			})
+			.on("end", async () => {
+				console.log("CSV processing completed");
+				await client.query(
+					results
+						.map((v) => `INSERT INTO transactions(account_id) VALUES (${v.id})`)
+						.join(";")
+				);
+				res.json({ success: true, size: results.length });
+			})
+			.on("error", (error) => {
+				console.error("Error reading CSV file:", error);
+				res.status(500).json({ error: error.message });
+			});
+	} catch (error) {
+		console.error("Error:", error);
+		res.status(500).json({ error: error.message });
 	}
 });
 
