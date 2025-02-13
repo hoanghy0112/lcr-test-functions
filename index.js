@@ -189,11 +189,11 @@ app.post("/save-to-db", async (req, res) => {
 						chargebackFee
 					);
 					batch = [];
+					console.log({ total: results.total });
 					// const promise = client.query(query);
 					// promises.push(promise);
 					// await promise;
 					// promises.splice(promises.indexOf(promise), 1);
-					console.log(query);
 					client.query(query);
 				}
 			})
@@ -211,7 +211,6 @@ app.post("/save-to-db", async (req, res) => {
 						chargebackFee
 					);
 					batch = [];
-					console.log({ query });
 					// const promise = client.query(query);
 					// promises.push(promise);
 					// await promise;
