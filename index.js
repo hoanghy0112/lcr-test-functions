@@ -31,7 +31,12 @@ app.use(express.urlencoded({ limit: "2000mb", extended: true }));
 
 app.get("/get-signed-url", async (req, res) => {
 	try {
-		const fileName = req.query.fileName; // Get filename from frontend
+		const fileName = `${req.query.fileName
+			.split(".")
+			.slice(0, -1)
+			.join(".")}_${new Date().getTime()}.${req.query.fileName
+			.split(".")
+			.at(-1)}`;
 		const file = bucket.file(fileName);
 
 		const [url] = await file.getSignedUrl({
@@ -41,7 +46,7 @@ app.get("/get-signed-url", async (req, res) => {
 			contentType: "application/octet-stream", // Accept any file type
 		});
 
-		res.json({ url });
+		res.json({ url, fileName });
 	} catch (error) {
 		res.status(500).json({ error });
 	}
@@ -68,7 +73,10 @@ app.post("/save-to-db", async (req, res) => {
 				console.log("CSV processing completed");
 				await client.query(
 					results
-						.map((v) => `INSERT INTO transactions(account_id) VALUES (${v.id})`)
+						.map(
+							(v) =>
+								`INSERT INTO transactions(account_id) VALUES (${v.id})`
+						)
 						.join(";")
 				);
 				res.json({ success: true, size: results.length });
