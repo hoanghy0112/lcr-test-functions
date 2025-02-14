@@ -318,10 +318,13 @@ app.post("/save-to-db", async (req, res) => {
 					SET is_save_to_db_done = TRUE, max_rows = ${results.total}
 					WHERE client_id = ${clientId} AND file_name = '${clientFileName}';
 				`);
+
+				client.release();
 				res.json({ success: true, size: results.total });
 			})
 			.on("error", (error) => {
 				console.error("Error reading CSV file:", error);
+				client.release();
 				res.status(500).json({ error: error.message });
 			});
 	} catch (error) {
@@ -331,6 +334,7 @@ app.post("/save-to-db", async (req, res) => {
 			SET error_msg = '${JSON.stringify(error)}'
 			WHERE client_id = ${clientId} AND file_name = '${clientFileName}';
 		`);
+		client.release();
 		res.status(500).json({ error: error.message });
 	}
 });
