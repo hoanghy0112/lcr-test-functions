@@ -280,9 +280,17 @@ app.post("/save-to-db", async (req, res) => {
 						client,
 						stream
 					);
-					BATCH_SIZE = newBatchSize;
+					// AIMD algorithm to optimize batch size
+					if (newBatchSize === BATCH_SIZE) {
+						BATCH_SIZE = BATCH_SIZE * 1.2;
+					} else BATCH_SIZE = newBatchSize;
 
-					console.log({ total: results.total, clientId, clientFileName, BATCH_SIZE });
+					console.log({
+						total: results.total,
+						clientId,
+						clientFileName,
+						BATCH_SIZE,
+					});
 					stream.resume();
 				}
 				batch.push(row);
