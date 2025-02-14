@@ -1,3 +1,4 @@
+/* eslint-disable no-constant-condition */
 /* eslint-disable max-len */
 /* eslint-disable new-cap */
 /* eslint-disable comma-dangle */
@@ -87,6 +88,88 @@ function convertValueInSQL(value) {
 	}
 }
 
+async function retryUntilSuccess(fn, delayMs = 2000) {
+	while (true) {
+		try {
+			const result = await fn();
+			return result;
+		} catch (error) {
+			console.error("Error encountered, retrying...", error);
+			if (error.code != "53200") throw error;
+			if (delayMs > 0) {
+				// Wait for the specified delay before trying again.
+				await new Promise((resolve) => setTimeout(resolve, delayMs));
+			}
+			// Loop continues to retry.
+		}
+	}
+}
+
+async function saveBatchToDb(
+	batch,
+	mappingConfig,
+	clientId,
+	clientFileName,
+	additionalNotes,
+	collectionFee,
+	chargebackFee,
+	client,
+	stream
+) {
+	const query = getSQLQuery(
+		batch,
+		mappingConfig,
+		clientId,
+		clientFileName,
+		additionalNotes,
+		collectionFee,
+		chargebackFee
+	);
+	console.log({ size: batch.length, clientId, clientFileName });
+
+	try {
+		await client.query(query);
+		return batch.length;
+	} catch (error) {
+		console.log({ error });
+		if (error.code != "53200") {
+			await client.query(`
+				UPDATE uploading_files
+				SET error_msg = '${JSON.stringify(error)}'
+				WHERE client_id = ${clientId} AND file_name = '${clientFileName}';
+			`);
+			throw error;
+		}
+		const leftBatch = batch.slice(0, Math.floor(batch.length / 2));
+		const rightBatch = batch.slice(Math.floor(batch.length / 2));
+
+		const leftBatchSize = await saveBatchToDb(
+			leftBatch,
+			mappingConfig,
+			clientId,
+			clientFileName,
+			additionalNotes,
+			collectionFee,
+			chargebackFee,
+			client,
+			stream
+		);
+		const rightBatchSize = await saveBatchToDb(
+			rightBatch,
+			mappingConfig,
+			clientId,
+			clientFileName,
+			additionalNotes,
+			collectionFee,
+			chargebackFee,
+			client,
+			stream
+		);
+
+		return Math.min(leftBatchSize, rightBatchSize);
+	}
+}
+
 function getSQLQuery(
 	batch,
 	mappingConfig,
@@ -151,72 +234,77 @@ app.get("/get-signed-url", async (req, res) => {
 });
 
 app.post("/save-to-db", async (req, res) => {
-	try {
-		const fileName = req.body.fileName;
-		const clientFileName = req.body.clientFileName;
-		const clientId = req.body.clientId;
-		const mappingConfig = req.body.mappingConfig;
-		const additionalNotes = req.body.additionalNotes;
-		const collectionFee = req.body.collectionFee;
-		const chargebackFee = req.body.chargebackFee;
-		const defaultBatchSize = req.body.batchSize || 1000;
+	const client = await pool.connect();
 
+	const clientFileName = req.body.clientFileName;
+	const clientId = req.body.clientId;
+	const fileName = req.body.fileName;
+	const mappingConfig = req.body.mappingConfig;
+	const additionalNotes = req.body.additionalNotes;
+	const collectionFee = req.body.collectionFee;
+	const chargebackFee = req.body.chargebackFee;
+	const defaultBatchSize = req.body.batchSize || 1000;
+
+	await client.query(`
+		UPDATE uploading_files
+		SET is_done = TRUE
+		WHERE client_id = ${clientId} AND file_name = '${clientFileName}';
+	`);
+
+	try {
 		const file = bucket.file(fileName);
 
 		const stream = file.createReadStream();
 		const csvStream = csv();
 
-		const client = await pool.connect();
-
 		const results = { total: 0 };
-		const BATCH_SIZE = defaultBatchSize;
+		let BATCH_SIZE = defaultBatchSize;
 		let batch = [];
-		const promises = [];
 
 		stream
 			.pipe(csvStream)
 			.on("data", async (row) => {
-				batch.push(row);
 				if (batch.length >= BATCH_SIZE) {
+					stream.pause();
 					results.total += batch.length;
-					const query = getSQLQuery(
-						batch,
+					const copiedBatch = [...batch];
+					batch = [];
+					const newBatchSize = await saveBatchToDb(
+						copiedBatch,
 						mappingConfig,
 						clientId,
 						clientFileName,
 						additionalNotes,
 						collectionFee,
-						chargebackFee
+						chargebackFee,
+						client,
+						stream
 					);
-					batch = [];
-					console.log({ total: results.total });
-					// const promise = client.query(query);
-					// promises.push(promise);
-					// await promise;
-					// promises.splice(promises.indexOf(promise), 1);
-					client.query(query);
+					BATCH_SIZE = newBatchSize;
+
+					console.log({ total: results.total, clientId, clientFileName, BATCH_SIZE });
+					stream.resume();
 				}
+				batch.push(row);
 			})
 			.on("end", async () => {
 				console.log("CSV processing completed");
 				if (batch.length > 0) {
 					results.total += batch.length;
-					const query = getSQLQuery(
-						batch,
+
+					await saveBatchToDb(
+						[...batch],
 						mappingConfig,
 						clientId,
 						clientFileName,
 						additionalNotes,
 						collectionFee,
-						chargebackFee
+						chargebackFee,
+						client,
+						stream
 					);
 					batch = [];
-					// const promise = client.query(query);
-					// promises.push(promise);
-					// await promise;
-					client.query(query);
 				}
-				await Promise.all(promises);
 				await client.query(`
 					UPDATE uploading_files
 					SET is_save_to_db_done = TRUE, max_rows = ${results.total}
@@ -230,6 +318,11 @@ app.post("/save-to-db", async (req, res) => {
 			});
 	} catch (error) {
 		console.error("Error:", error);
+		await client.query(`
+			UPDATE uploading_files
+			SET error_msg = '${JSON.stringify(error)}'
+			WHERE client_id = ${clientId} AND file_name = '${clientFileName}';
+		`);
 		res.status(500).json({ error: error.message });
 	}
 });
@@ -289,4 +382,4 @@ app.post("/upload", async (req, res) => {
 	}
 });
 
-exports.uploadFile = functions.https.onRequest(app);
+exports.uploadFile_v2 = functions.https.onRequest(app);
