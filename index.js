@@ -21,7 +21,7 @@ const databaseURL = defineString("DATABASE_URL");
 admin.initializeApp();
 const app = express();
 const storage = new Storage();
-const bucket = storage.bucket("hy-lcr-test");
+const bucket = storage.bucket("lcr-upload-files");
 
 const pool = new Pool({
 	connectionString: databaseURL.value(),
@@ -210,6 +210,17 @@ function getSQLQuery(
 	return query;
 }
 
+async function sendErrorEmail(data) {
+	return await fetch(
+		"https://netpartnerservices.retool.com/url/send-fail-to-save",
+		{
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify(data),
+		}
+	);
+}
+
 app.get("/get-signed-url", async (req, res) => {
 	try {
 		const fileName = `${req.query.fileName
@@ -233,6 +244,59 @@ app.get("/get-signed-url", async (req, res) => {
 	}
 });
 
+app.post("/update-uploading-state", async (req, res) => {
+	const client = await pool.connect();
+
+	const fileName = req.body.fileName;
+	const clientId = req.body.clientId;
+
+	await client.query(`
+		UPDATE uploading_files
+		SET last_upload_at = NOW()
+		WHERE client_id = ${clientId} AND file_name = '${fileName}';
+	`);
+
+	return res.json({});
+});
+
+app.post("/retry-save-to-db", async (req, res) => {
+	const client = await pool.connect();
+
+	const clientFileName = req.body.clientFileName;
+	const clientId = req.body.clientId;
+
+	await client.query(`
+		UPDATE uploading_files
+		SET error_msg = NULL, uploaded_rows = 0, last_sent_notification_email = NULL 
+		WHERE client_id = ${clientId} AND file_name = '${clientFileName}';
+	`);
+	const result = await client.query(`
+		SELECT * FROM uploading_files
+		WHERE client_id = ${clientId} AND file_name = '${clientFileName}';
+	`);
+	const savingData = result.rows?.[0].saving_data;
+	console.log({ type: typeof savingData, savingData });
+
+	// await client.query(`
+	// 	DELETE FROM uploading_files
+	// 	WHERE client_id = ${clientId} AND file_name = '${clientFileName}';
+
+	// 	UPDATE uploading_files
+	// 	SET error_msg = NULL, uploaded_rows = 0, is_save_to_db_done = FALSE
+	// 	WHERE client_id = ${clientId} AND file_name = '${clientFileName}';
+	// `);
+
+	fetch("https://uploadfile-h2ijf5nwua-uc.a.run.app/save-to-db", {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify(savingData),
+	});
+
+	return res.json({
+		success: true,
+	});
+});
+
 app.post("/save-to-db", async (req, res) => {
 	const client = await pool.connect();
 
@@ -244,14 +308,17 @@ app.post("/save-to-db", async (req, res) => {
 	const collectionFee = req.body.collectionFee;
 	const chargebackFee = req.body.chargebackFee;
 	const defaultBatchSize = req.body.batchSize || 1000;
-
-	await client.query(`
-		UPDATE uploading_files
-		SET is_done = TRUE
-		WHERE client_id = ${clientId} AND file_name = '${clientFileName}';
-	`);
+	const startDate = req.body.startDate;
+	const receiver = req.body.receiver;
+	const timezone = req.body.timezone;
 
 	try {
+		await client.query(`
+			UPDATE uploading_files
+			SET is_done = TRUE, saving_data = '${JSON.stringify(req.body)}'
+			WHERE client_id = ${clientId} AND file_name = '${clientFileName}';
+		`);
+
 		const file = bucket.file(fileName);
 
 		const stream = file.createReadStream();
@@ -264,36 +331,49 @@ app.post("/save-to-db", async (req, res) => {
 		stream
 			.pipe(csvStream)
 			.on("data", async (row) => {
-				if (batch.length >= BATCH_SIZE) {
-					stream.pause();
-					results.total += batch.length;
-					const copiedBatch = [...batch];
-					batch = [];
-					const newBatchSize = await saveBatchToDb(
-						copiedBatch,
-						mappingConfig,
-						clientId,
-						clientFileName,
-						additionalNotes,
-						collectionFee,
-						chargebackFee,
-						client,
-						stream
-					);
-					// AIMD algorithm to optimize batch size
-					if (newBatchSize === BATCH_SIZE) {
-						BATCH_SIZE = BATCH_SIZE * 1.2;
-					} else BATCH_SIZE = newBatchSize;
+				try {
+					if (batch.length >= BATCH_SIZE) {
+						stream.pause();
+						results.total += batch.length;
+						const copiedBatch = [...batch];
+						batch = [];
+						const newBatchSize = await saveBatchToDb(
+							copiedBatch,
+							mappingConfig,
+							clientId,
+							clientFileName,
+							additionalNotes,
+							collectionFee,
+							chargebackFee,
+							client,
+							stream
+						);
+						// AIMD algorithm to optimize batch size
+						if (newBatchSize === BATCH_SIZE) {
+							BATCH_SIZE = BATCH_SIZE * 1.2;
+						} else BATCH_SIZE = newBatchSize;
 
-					console.log({
-						total: results.total,
+						console.log({
+							total: results.total,
+							clientId,
+							clientFileName,
+							BATCH_SIZE,
+						});
+						stream.resume();
+					}
+					batch.push(row);
+				} catch (error) {
+					await sendErrorEmail({
+						filename: clientFileName,
 						clientId,
-						clientFileName,
-						BATCH_SIZE,
+						totalRows: results.total,
+						doneAt: new Date().getTime(),
+						createdAt: startDate,
+						receiver,
+						timezone,
+						reason: `[Fail to reading CSV file] ${error}`,
 					});
-					stream.resume();
 				}
-				batch.push(row);
 			})
 			.on("end", async () => {
 				console.log("CSV processing completed");
@@ -313,6 +393,7 @@ app.post("/save-to-db", async (req, res) => {
 					);
 					batch = [];
 				}
+				await client.query(`VACUUM ANALYZE transactions`);
 				await client.query(`
 					UPDATE uploading_files
 					SET is_save_to_db_done = TRUE, max_rows = ${results.total}
@@ -320,10 +401,36 @@ app.post("/save-to-db", async (req, res) => {
 				`);
 
 				client.release();
+				await fetch(
+					"https://netpartnerservices.retool.com/url/send-email",
+					{
+						method: "POST",
+						headers: { "Content-Type": "application/json" },
+						body: JSON.stringify({
+							filename: clientFileName,
+							clientId,
+							totalRows: results.total,
+							doneAt: new Date().getTime(),
+							createdAt: startDate,
+							receiver,
+							timezone,
+						}),
+					}
+				);
 				res.json({ success: true, size: results.total });
 			})
-			.on("error", (error) => {
+			.on("error", async (error) => {
 				console.error("Error reading CSV file:", error);
+				await sendErrorEmail({
+					filename: clientFileName,
+					clientId,
+					totalRows: results.total,
+					doneAt: new Date().getTime(),
+					createdAt: startDate,
+					receiver,
+					timezone,
+					reason: `[Fail to reading CSV file] ${error}`,
+				});
 				client.release();
 				res.status(500).json({ error: error.message });
 			});
@@ -334,6 +441,16 @@ app.post("/save-to-db", async (req, res) => {
 			SET error_msg = '${JSON.stringify(error)}'
 			WHERE client_id = ${clientId} AND file_name = '${clientFileName}';
 		`);
+		await sendErrorEmail({
+			filename: clientFileName,
+			clientId,
+			totalRows: results.total,
+			doneAt: new Date().getTime(),
+			createdAt: startDate,
+			receiver,
+			timezone,
+			reason: `[Unknown error] ${error}`,
+		});
 		client.release();
 		res.status(500).json({ error: error.message });
 	}
@@ -394,4 +511,4 @@ app.post("/upload", async (req, res) => {
 	}
 });
 
-exports.uploadFile_v2 = functions.https.onRequest(app);
+exports.uploadFile = functions.https.onRequest(app);
