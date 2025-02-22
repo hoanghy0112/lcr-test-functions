@@ -14,8 +14,21 @@ const cors = require("cors");
 const { Storage } = require("@google-cloud/storage");
 const csv = require("csv-parser");
 const { Pool } = require("pg");
+const { writeFileSync } = require("fs");
+
+require("dotenv").config();
+
+const {
+	saveBatchToDb,
+	sendErrorEmail,
+	getDbClient,
+	convertValueInSQL,
+} = require("./libs/utils");
+
+const { RETOOL_DATABASE, CLOUD_SQL_DATABASE } = process.env;
 
 const { defineString } = require("firebase-functions/params");
+const { RETRY_URL } = require("./libs/constants");
 const databaseURL = defineString("DATABASE_URL");
 
 admin.initializeApp();
@@ -33,193 +46,6 @@ const pool = new Pool({
 app.use(cors()); // Default allows all origins (*)
 app.use(express.json({ limit: "2000mb" }));
 app.use(express.urlencoded({ limit: "2000mb", extended: true }));
-
-const fields = [
-	"account_id",
-	"order_id",
-	"email",
-	"service_offer",
-	"principal",
-	"first_name",
-	"last_name",
-	"address",
-	"address_2",
-	"city",
-	"state",
-	"zip",
-	"country",
-	"default_date",
-	"phone_number_1",
-	"ip_address",
-	"tracking_number",
-	"notes",
-	"card_number",
-];
-
-function isNumber(value) {
-	return typeof value === "number" && !isNaN(value);
-}
-
-const parseToFloat = (value) => {
-	if (typeof value === "string") {
-		let cleanedStr = value.replace(/[^0-9,.]/g, "");
-
-		if (cleanedStr.includes(",") && cleanedStr.includes(".")) {
-			cleanedStr = cleanedStr.replace(/,/g, "");
-		} else {
-			cleanedStr = cleanedStr.replace(/,/g, ".");
-		}
-
-		const number = parseFloat(cleanedStr);
-
-		return isNaN(number) ? null : number;
-	}
-	return typeof value === "number" ? value : 0;
-};
-
-function convertValueInSQL(value) {
-	if (value === null || value === undefined) {
-		return "null";
-	}
-	if (isNumber(value)) {
-		return value || 0;
-	} else {
-		return `'${value.replaceAll("'", '"')}'`;
-	}
-}
-
-async function retryUntilSuccess(fn, delayMs = 2000) {
-	while (true) {
-		try {
-			const result = await fn();
-			return result;
-		} catch (error) {
-			console.error("Error encountered, retrying...", error);
-			if (error.code != "53200") throw error;
-			if (delayMs > 0) {
-				// Wait for the specified delay before trying again.
-				await new Promise((resolve) => setTimeout(resolve, delayMs));
-			}
-			// Loop continues to retry.
-		}
-	}
-}
-
-async function saveBatchToDb(
-	batch,
-	mappingConfig,
-	clientId,
-	clientFileName,
-	additionalNotes,
-	collectionFee,
-	chargebackFee,
-	client,
-	stream
-) {
-	const query = getSQLQuery(
-		batch,
-		mappingConfig,
-		clientId,
-		clientFileName,
-		additionalNotes,
-		collectionFee,
-		chargebackFee
-	);
-	console.log({ size: batch.length, clientId, clientFileName });
-
-	try {
-		await client.query(query);
-		return batch.length;
-	} catch (error) {
-		console.log({ error });
-		if (error.code != "53200") {
-			await client.query(`
-				UPDATE uploading_files
-				SET error_msg = '${JSON.stringify(error)}'
-				WHERE client_id = ${clientId} AND file_name = '${clientFileName}';
-			`);
-			throw error;
-		}
-		const leftBatch = batch.slice(0, Math.floor(batch.length / 2));
-		const rightBatch = batch.slice(Math.floor(batch.length / 2));
-
-		const leftBatchSize = await saveBatchToDb(
-			leftBatch,
-			mappingConfig,
-			clientId,
-			clientFileName,
-			additionalNotes,
-			collectionFee,
-			chargebackFee,
-			client,
-			stream
-		);
-		const rightBatchSize = await saveBatchToDb(
-			rightBatch,
-			mappingConfig,
-			clientId,
-			clientFileName,
-			additionalNotes,
-			collectionFee,
-			chargebackFee,
-			client,
-			stream
-		);
-
-		return Math.min(leftBatchSize, rightBatchSize);
-	}
-}
-
-function getSQLQuery(
-	batch,
-	mappingConfig,
-	clientId,
-	clientFileName,
-	additionalNotes,
-	collectionFee,
-	chargebackFee
-) {
-	const insertData = batch.map((item) => {
-		return fields.map((field) => item[mappingConfig[field]] || null);
-	});
-	const placeholders = insertData
-		.map(
-			(rowData, rowIndex) =>
-				`(${rowData
-					.map((d, i) =>
-						convertValueInSQL(
-							fields[i] === "principal" ? parseToFloat(d) : d
-						)
-					)
-					.join(",")}, ${clientId}, ${convertValueInSQL(
-					clientFileName
-				)}, ${convertValueInSQL(additionalNotes)}, ${convertValueInSQL(
-					collectionFee
-				)}, ${convertValueInSQL(chargebackFee)})`
-		)
-		.join(",");
-
-	let query = `INSERT INTO transactions (${fields.join(
-		","
-	)}, client_id, file_name, global_terms_and_conditions, collection_fee, chargeback_fee) VALUES ${placeholders};`;
-	query += `
-	UPDATE uploading_files
-	SET uploaded_rows = uploaded_rows + ${batch.length}
-	WHERE client_id = ${clientId} AND file_name = '${clientFileName}';
-	`;
-	return query;
-}
-
-async function sendErrorEmail(data) {
-	return await fetch(
-		"https://netpartnerservices.retool.com/url/send-fail-to-save",
-		{
-			method: "POST",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify(data),
-		}
-	);
-}
 
 app.get("/get-signed-url", async (req, res) => {
 	try {
@@ -286,7 +112,7 @@ app.post("/retry-save-to-db", async (req, res) => {
 	// 	WHERE client_id = ${clientId} AND file_name = '${clientFileName}';
 	// `);
 
-	fetch("https://uploadfile-h2ijf5nwua-uc.a.run.app/save-to-db", {
+	fetch(RETRY_URL, {
 		method: "POST",
 		headers: { "Content-Type": "application/json" },
 		body: JSON.stringify(savingData),
@@ -509,6 +335,75 @@ app.post("/upload", async (req, res) => {
 		console.error("Upload error:", error);
 		res.status(500).json({ error: "Upload failed" });
 	}
+});
+
+app.post("/migrate", async (req, res) => {
+	const num = req.query.num;
+	const batch = req.query.batch;
+
+	const retoolClient = await getDbClient(RETOOL_DATABASE);
+	const cloudSqlClient = await getDbClient(CLOUD_SQL_DATABASE);
+
+	const { rows } = await cloudSqlClient.query(`
+		SELECT COUNT(*) AS count FROM transactions	
+	`);
+	const from = rows[0].count;
+
+	for (let i = 0; i < num; i++) {
+		const queries = [];
+
+		const dataList = await retoolClient.query(`
+			SELECT * FROM transactions
+			OFFSET ${from + i * batch}
+			LIMIT ${batch}	
+		`);
+
+		for (let data of dataList.rows) {
+			queries.push(`
+				INSERT INTO transactions (
+					id, account_id, order_id, service_offer, principal, collection_fee, chargeback_fee, outstanding_balance, 
+					email, first_name, last_name, default_date, phone_number_1, address, address_2, city, state, zip, country, 
+					ip_address, tracking_number, notes, card_number, product_terms_and_conditions, 
+					global_terms_and_conditions, file_name, timestamp, client_id
+				) VALUES (
+					${convertValueInSQL(parseInt(data.id))}, 
+					${convertValueInSQL(data.account_id)}, 
+					${convertValueInSQL(data.order_id)}, 
+					${convertValueInSQL(data.service_offer)}, 
+					${convertValueInSQL(parseFloat(data.principal))}, 
+					${convertValueInSQL(parseFloat(data.collection_fee))}, 
+					${convertValueInSQL(parseFloat(data.chargeback_fee))}, 
+					${convertValueInSQL(parseFloat(data.outstanding_balance))}, 
+					${convertValueInSQL(data.email)}, 
+					${convertValueInSQL(data.first_name)}, 
+					${convertValueInSQL(data.last_name)}, 
+					${convertValueInSQL(data.default_date)}, 
+					${convertValueInSQL(data.phone_number_1)}, 
+					${convertValueInSQL(data.address)}, 
+					${convertValueInSQL(data.address_2)}, 
+					${convertValueInSQL(data.city)}, 
+					${convertValueInSQL(data.state)}, 
+					${convertValueInSQL(data.zip)}, 
+					${convertValueInSQL(data.country)}, 
+					${convertValueInSQL(data.ip_address)}, 
+					${convertValueInSQL(data.tracking_number)}, 
+					${convertValueInSQL(data.notes)}, 
+					${convertValueInSQL(data.card_number)}, 
+					${convertValueInSQL(data.product_terms_and_conditions)}, 
+					${convertValueInSQL(data.global_terms_and_conditions)}, 
+					${convertValueInSQL(data.file_name)}, 
+					${data.timestamp ? new Date(data.timestamp).toISOString() : "null"}, 
+					${convertValueInSQL(parseInt(data.client_id))}
+				)
+			`);
+		}
+
+		const queryString = queries.join(";");
+
+		await cloudSqlClient.query(queryString);
+	}
+
+	return res.json({ from });
 });
 
 exports.uploadFile = functions.https.onRequest(app);
