@@ -25,11 +25,9 @@ const {
 	convertValueInSQL,
 } = require("./libs/utils");
 
-const { RETOOL_DATABASE, CLOUD_SQL_DATABASE } = process.env;
+const { DATABASE_URL, RETOOL_DATABASE, CLOUD_SQL_DATABASE } = process.env;
 
-const { defineString } = require("firebase-functions/params");
 const { RETRY_URL } = require("./libs/constants");
-const databaseURL = defineString("DATABASE_URL");
 
 admin.initializeApp();
 const app = express();
@@ -37,7 +35,7 @@ const storage = new Storage();
 const bucket = storage.bucket("lcr-upload-files");
 
 const pool = new Pool({
-	connectionString: databaseURL.value(),
+	connectionString: DATABASE_URL,
 	ssl: {
 		rejectUnauthorized: false,
 	},
@@ -351,9 +349,9 @@ app.post("/migrate", async (req, res) => {
 
 	try {
 		const { rows } = await cloudSqlClient.query(`
-			SELECT COUNT(*) AS count FROM transactions	
+			SELECT * FROM migrate LIMIT 1;	
 		`);
-		const from = parseInt(rows[0].count);
+		const from = parseInt(rows[0].current_num);
 		console.log(`From: ${from}, batch: ${batch}`);
 
 		for (let i = 0; i < num; i++) {
@@ -384,12 +382,11 @@ app.post("/migrate", async (req, res) => {
 				// });
 				queries.push(`
 				INSERT INTO transactions (
-					id, account_id, order_id, service_offer, principal, collection_fee, chargeback_fee, outstanding_balance, 
+					account_id, order_id, service_offer, principal, collection_fee, chargeback_fee, outstanding_balance, 
 					email, first_name, last_name, default_date, phone_number_1, address, address_2, city, state, zip, country, 
 					ip_address, tracking_number, notes, card_number, product_terms_and_conditions, 
 					global_terms_and_conditions, file_name, timestamp, client_id
 				) VALUES (
-					${convertValueInSQL(parseInt(data.id))}, 
 					${convertValueInSQL(data.account_id)}, 
 					${convertValueInSQL(data.order_id)}, 
 					${convertValueInSQL(data.service_offer)}, 
@@ -424,6 +421,11 @@ app.post("/migrate", async (req, res) => {
 			const queryString = queries.join(";");
 
 			await cloudSqlClient.query(queryString);
+			await cloudSqlClient.query(`
+				UPDATE migrate
+				SET current_num = ${from + i * batch + batch}
+				WHERE id = 1;
+			`)
 			console.log("Finish save data list to db");
 		}
 

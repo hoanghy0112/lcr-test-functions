@@ -3,12 +3,8 @@
   "description": "Cloud Functions for Firebase",
   "scripts": {
     "lint": "",
-    "serve": "firebase emulators:start --only functions",
-    "shell": "firebase functions:shell",
-    "start": "npm run shell",
-    "deploy": "firebase deploy --only functions",
-    "dev": "functions-framework --target=uploadFile",
-    "logs": "firebase functions:log"
+    "deploy": "gcloud functions deploy FUNCTION_NAME --region=us-central1 --runtime=nodejs22 --entry-point=uploadFile --trigger-http --allow-unauthenticated --memory=1gb --cpu=1 --max-instances=20 --concurrency=5 --timeout=3600s",
+    "dev": "functions-framework --target=uploadFile"
   },
   "engines": {
     "node": "22"

@@ -26,7 +26,7 @@ const fields = [
 	"notes",
 	"card_number",
 ];
-const RETRY_URL = "https://uploadfile-h2ijf5nwua-uc.a.run.app/save-to-db";
+const RETRY_URL = "https://us-central1-valiant-pager-451605-v0.cloudfunctions.net/uploadFile/save-to-db";
 
 module.exports = {
 	fields,
