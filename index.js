@@ -341,25 +341,32 @@ app.post("/migrate", async (req, res) => {
 	const num = req.query.num;
 	const batch = req.query.batch;
 
-	const retoolClient = await getDbClient(RETOOL_DATABASE);
-	const cloudSqlClient = await getDbClient(CLOUD_SQL_DATABASE);
+	const { client: cloudSqlClient, pool: cloudSqlPool } = await getDbClient(
+		CLOUD_SQL_DATABASE
+	);
+	const { client: retoolClient, pool: retoolPool } = await getDbClient(
+		RETOOL_DATABASE
+	);
 
-	const { rows } = await cloudSqlClient.query(`
-		SELECT COUNT(*) AS count FROM transactions	
-	`);
-	const from = rows[0].count;
-
-	for (let i = 0; i < num; i++) {
-		const queries = [];
-
-		const dataList = await retoolClient.query(`
-			SELECT * FROM transactions
-			OFFSET ${from + i * batch}
-			LIMIT ${batch}	
+	try {
+		const { rows } = await cloudSqlClient.query(`
+			SELECT COUNT(*) AS count FROM transactions	
 		`);
+		const from = rows[0].count;
 
-		for (let data of dataList.rows) {
-			queries.push(`
+		for (let i = 0; i < num; i++) {
+			const queries = [];
+
+			const dataList = await retoolClient.query(`
+				SELECT * FROM transactions
+				ORDER BY id
+				OFFSET ${from + i * batch}
+				LIMIT ${batch}	
+			`);
+			console.log("Finish getting data list");
+
+			for (let data of dataList.rows) {
+				queries.push(`
 				INSERT INTO transactions (
 					id, account_id, order_id, service_offer, principal, collection_fee, chargeback_fee, outstanding_balance, 
 					email, first_name, last_name, default_date, phone_number_1, address, address_2, city, state, zip, country, 
@@ -396,14 +403,27 @@ app.post("/migrate", async (req, res) => {
 					${convertValueInSQL(parseInt(data.client_id))}
 				)
 			`);
+			}
+
+			const queryString = queries.join(";");
+
+			await cloudSqlClient.query(queryString);
+			console.log("Finish save data list to db");
 		}
 
-		const queryString = queries.join(";");
-
-		await cloudSqlClient.query(queryString);
+		return res.json({ from });
+	} catch (error) {
+		retoolClient.release();
+		cloudSqlClient.release();
+		retoolPool.end();
+		cloudSqlPool.end();
+		return res.json({ error });
 	}
+});
 
-	return res.json({ from });
+process.on("SIGINT", async () => {
+	await pool.end();
+	process.exit(0);
 });
 
 exports.uploadFile = functions.https.onRequest(app);
