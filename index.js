@@ -338,8 +338,8 @@ app.post("/upload", async (req, res) => {
 });
 
 app.post("/migrate", async (req, res) => {
-	const num = req.query.num;
-	const batch = req.query.batch;
+	const num = parseInt(req.query.num);
+	const batch = parseInt(req.query.batch);
 
 	const { client: cloudSqlClient, pool: cloudSqlPool } = await getDbClient(
 		CLOUD_SQL_DATABASE
@@ -347,18 +347,25 @@ app.post("/migrate", async (req, res) => {
 	const { client: retoolClient, pool: retoolPool } = await getDbClient(
 		RETOOL_DATABASE
 	);
+	console.log("Connect successfully...");
 
 	try {
 		const { rows } = await cloudSqlClient.query(`
 			SELECT COUNT(*) AS count FROM transactions	
 		`);
-		const from = rows[0].count;
+		const from = parseInt(rows[0].count);
+		console.log(`From: ${from}, batch: ${batch}`);
 
 		for (let i = 0; i < num; i++) {
 			const queries = [];
 
+			console.log(`Fetch with offset: ${from + i * batch}`);
 			const dataList = await retoolClient.query(`
-				SELECT * FROM transactions
+				SELECT 
+					*,
+					TO_CHAR(timestamp AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS iso_timestamp,
+					TO_CHAR(default_date AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS iso_default_date
+				FROM transactions
 				ORDER BY id
 				OFFSET ${from + i * batch}
 				LIMIT ${batch}	
@@ -366,6 +373,15 @@ app.post("/migrate", async (req, res) => {
 			console.log("Finish getting data list");
 
 			for (let data of dataList.rows) {
+				// console.log({
+				// 	data: data.timestamp,
+				// 	type: typeof data.timestamp,
+				// 	string: new Date(data.timestamp)
+				// 		.toISOString()
+				// 		.split("T")
+				// 		.join(" ")
+				// 		.slice(0, 19),
+				// });
 				queries.push(`
 				INSERT INTO transactions (
 					id, account_id, order_id, service_offer, principal, collection_fee, chargeback_fee, outstanding_balance, 
@@ -384,7 +400,7 @@ app.post("/migrate", async (req, res) => {
 					${convertValueInSQL(data.email)}, 
 					${convertValueInSQL(data.first_name)}, 
 					${convertValueInSQL(data.last_name)}, 
-					${convertValueInSQL(data.default_date)}, 
+					${data.iso_default_date ? `'${data.iso_default_date}'` : "'null'"}, 
 					${convertValueInSQL(data.phone_number_1)}, 
 					${convertValueInSQL(data.address)}, 
 					${convertValueInSQL(data.address_2)}, 
@@ -399,7 +415,7 @@ app.post("/migrate", async (req, res) => {
 					${convertValueInSQL(data.product_terms_and_conditions)}, 
 					${convertValueInSQL(data.global_terms_and_conditions)}, 
 					${convertValueInSQL(data.file_name)}, 
-					${data.timestamp ? new Date(data.timestamp).toISOString() : "null"}, 
+					${data.iso_timestamp ? `'${data.iso_timestamp}'` : "'null'"}, 
 					${convertValueInSQL(parseInt(data.client_id))}
 				)
 			`);
@@ -413,6 +429,7 @@ app.post("/migrate", async (req, res) => {
 
 		return res.json({ from });
 	} catch (error) {
+		console.log(error);
 		retoolClient.release();
 		cloudSqlClient.release();
 		retoolPool.end();

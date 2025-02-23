@@ -35,7 +35,7 @@ function convertValueInSQL(value) {
 	}
 	if (isNumber(value)) {
 		return value || 0;
-	} else if (isNaN(value)) {
+	} else if (isNaN(value) && typeof value === "number") {
 		return "null";
 	} else {
 		return `'${value.replaceAll("'", "''")}'`;
@@ -159,13 +159,20 @@ async function sendErrorEmail(data) {
 }
 
 async function getDbClient(url) {
+	console.log({ url });
 	const pool = new Pool({
 		connectionString: url,
 		ssl: {
 			rejectUnauthorized: false,
 		},
 	});
-	return await pool.connect();
+	try {
+		const client = await pool.connect();
+		return { client, pool };
+	} catch (error) {
+		pool.end();
+		throw error;
+	}
 }
 
 module.exports = {
