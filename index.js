@@ -32,7 +32,7 @@ const { RETRY_URL } = require("./libs/constants");
 admin.initializeApp();
 const app = express();
 const storage = new Storage();
-const bucket = storage.bucket("lcr-upload-files");
+const bucket = storage.bucket("lcr-uploaded-files");
 
 const pool = new Pool({
 	connectionString: DATABASE_URL,
