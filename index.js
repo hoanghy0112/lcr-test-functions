@@ -27,7 +27,7 @@ const {
 
 const { DATABASE_URL, RETOOL_DATABASE, CLOUD_SQL_DATABASE } = process.env;
 
-const { RETRY_URL } = require("./libs/constants");
+const { RETRY_URL, MAX_SAVING_BATCH_SIZE } = require("./libs/constants");
 
 admin.initializeApp();
 const app = express();
@@ -174,7 +174,10 @@ app.post("/save-to-db", async (req, res) => {
 						);
 						// AIMD algorithm to optimize batch size
 						if (newBatchSize === BATCH_SIZE) {
-							BATCH_SIZE = BATCH_SIZE * 1.2;
+							BATCH_SIZE = Math.min(
+								BATCH_SIZE * 1.2,
+								MAX_SAVING_BATCH_SIZE
+							);
 						} else BATCH_SIZE = newBatchSize;
 
 						console.log({
@@ -357,7 +360,7 @@ app.post("/migrate", async (req, res) => {
 		for (let i = 0; i < num; i++) {
 			const queries = [];
 
-			console.log(`Fetch with offset: ${from + i * batch}`);
+			console.log(`Fetch with offset: ${from + i * batch} (${new Date().toTimeString()})`);
 			const dataList = await retoolClient.query(`
 				SELECT 
 					*,
@@ -425,7 +428,7 @@ app.post("/migrate", async (req, res) => {
 				UPDATE migrate
 				SET current_num = ${from + i * batch + batch}
 				WHERE id = 1;
-			`)
+			`);
 			console.log("Finish save data list to db");
 		}
 
