@@ -409,7 +409,7 @@ app.post("/migrate", async (req, res) => {
 	try {
 		const { rows } = clientId
 			? await cloudSqlClient.query(`
-				SELECT COUNT(*) AS count FROM transactions WHERE client_id = ${clientId};	
+				SELECT COUNT(*) AS current_num FROM transactions WHERE client_id = ${clientId};	
 			`)
 			: await cloudSqlClient.query(`
 				SELECT * FROM migrate LIMIT 1;	
