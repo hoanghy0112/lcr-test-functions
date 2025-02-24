@@ -407,17 +407,15 @@ app.post("/migrate", async (req, res) => {
 	console.log("Connect successfully...");
 
 	try {
-		const { rows } = await cloudSqlClient.query(`
-			SELECT * FROM migrate LIMIT 1;	
-		`);
-		const from = clientId ? 0 : parseInt(rows[0].current_num);
-		console.log(`From: ${from}, batch: ${batch}`);
-
-		if (clientId) {
-			await cloudSqlClient.query(`
-				DELETE FROM transactions WHERE client_id = ${clientId}
+		const { rows } = clientId
+			? await cloudSqlClient.query(`
+				SELECT COUNT(*) AS count FROM transactions WHERE client_id = ${clientId};	
+			`)
+			: await cloudSqlClient.query(`
+				SELECT * FROM migrate LIMIT 1;	
 			`);
-		}
+		const from = parseInt(rows[0].current_num);
+		console.log(`From: ${from}, batch: ${batch}`);
 
 		for (let i = 0; i < num; i++) {
 			const queries = [];
