@@ -396,6 +396,7 @@ app.post("/upload", async (req, res) => {
 app.post("/migrate", async (req, res) => {
 	const num = parseInt(req.query.num);
 	const batch = parseInt(req.query.batch);
+	const clientId = parseInt(req.query.clientId);
 
 	const { client: cloudSqlClient, pool: cloudSqlPool } = await getDbClient(
 		CLOUD_SQL_DATABASE
@@ -409,8 +410,14 @@ app.post("/migrate", async (req, res) => {
 		const { rows } = await cloudSqlClient.query(`
 			SELECT * FROM migrate LIMIT 1;	
 		`);
-		const from = parseInt(rows[0].current_num);
+		const from = clientId ? 0 : parseInt(rows[0].current_num);
 		console.log(`From: ${from}, batch: ${batch}`);
+
+		if (clientId) {
+			await cloudSqlClient.query(`
+				DELETE FROM transactions WHERE client_id = ${clientId}
+			`);
+		}
 
 		for (let i = 0; i < num; i++) {
 			const queries = [];
@@ -426,6 +433,7 @@ app.post("/migrate", async (req, res) => {
 					TO_CHAR(timestamp AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS iso_timestamp,
 					TO_CHAR(default_date AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS iso_default_date
 				FROM transactions
+				${clientId ? `WHERE client_id = ${clientId}` : ""}
 				ORDER BY id
 				OFFSET ${from + i * batch}
 				LIMIT ${batch}	
