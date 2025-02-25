@@ -24,6 +24,7 @@ import {
 	sendErrorEmail,
 	getDbClient,
 	convertValueInSQL,
+	checkFileExists,
 } from "./libs/utils.mjs";
 
 import { RETRY_URL, MAX_SAVING_BATCH_SIZE } from "./libs/constants.mjs";
@@ -44,7 +45,8 @@ const {
 admin.initializeApp();
 const app = express();
 const storage = new Storage();
-const bucket = storage.bucket("lcr-uploaded-files");
+const bucketName = "lcr-uploaded-files";
+const bucket = storage.bucket(bucketName);
 
 const connector = new Connector();
 const clientOpts = await connector.getOptions({
@@ -111,7 +113,7 @@ app.post("/retry-save-to-db", async (req, res) => {
 
 	await client.query(`
 		UPDATE uploading_files
-		SET error_msg = NULL, uploaded_rows = 0, last_sent_notification_email = NULL 
+		SET error_msg = NULL, uploaded_rows = 0, last_sent_notification_email = NULL, last_upload_at = NOW()
 		WHERE client_id = ${clientId} AND file_name = '${clientFileName}';
 	`);
 	const result = await client.query(`
@@ -151,7 +153,7 @@ app.post("/continue-save-to-db", async (req, res) => {
 
 	await client.query(`
 		UPDATE uploading_files
-		SET is_pause = FALSE
+		SET is_pause = FALSE, last_upload_at = NOW()
 		WHERE client_id = ${clientId} AND file_name = '${clientFileName}';
 	`);
 	const result = await client.query(`
@@ -201,6 +203,12 @@ app.post("/save-to-db", async (req, res) => {
 			SET is_done = TRUE, saving_data = '${JSON.stringify(req.body)}'
 			WHERE client_id = ${clientId} AND file_name = '${clientFileName}';
 		`);
+
+		const isFileExists = await checkFileExists(bucketName, fileName);
+		if (!isFileExists) {
+			console.log("Storage error: fail to find filename");
+			throw new Error("Storage error: Fail to load the file from Google Cloud Storage (the file was deleted in GCS)");
+		}
 
 		const file = bucket.file(fileName);
 
@@ -344,7 +352,7 @@ app.post("/save-to-db", async (req, res) => {
 		console.error("Error:", error);
 		await client.query(`
 			UPDATE uploading_files
-			SET error_msg = '${JSON.stringify(error)}'
+			SET error_msg = '${error?.message ?? JSON.stringify(error)}'
 			WHERE client_id = ${clientId} AND file_name = '${clientFileName}';
 		`);
 		await sendErrorEmail({
@@ -355,7 +363,7 @@ app.post("/save-to-db", async (req, res) => {
 			createdAt: startDate,
 			receiver,
 			timezone,
-			reason: `[Unknown error] ${error}`,
+			reason: `[Unknown error] ${error?.message ?? ""}`,
 		});
 		client.release();
 		res.status(500).json({ error: error.message });

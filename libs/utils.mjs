@@ -7,6 +7,9 @@
 /* eslint-disable object-curly-spacing */
 import { fields } from "./constants.mjs";
 import pg from "pg";
+import { Storage } from "@google-cloud/storage";
+
+const storage = new Storage();
 
 const { Pool } = pg;
 
@@ -174,5 +177,21 @@ export async function getDbClient(url) {
 	} catch (error) {
 		pool.end();
 		throw error;
+	}
+}
+
+export async function checkFileExists(bucketName, fileName) {
+	try {
+		const [metadata] = await storage
+			.bucket(bucketName)
+			.file(fileName)
+			.getMetadata();
+		return true;
+	} catch (error) {
+		if (error.code === 404) {
+			return false;
+		} else {
+			throw new Error("Error checking file:", error);
+		}
 	}
 }
