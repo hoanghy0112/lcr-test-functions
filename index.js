@@ -80,6 +80,8 @@ app.post("/update-uploading-state", async (req, res) => {
 		WHERE client_id = ${clientId} AND file_name = '${fileName}';
 	`);
 
+	client.release();
+
 	return res.json({});
 });
 
@@ -116,6 +118,8 @@ app.post("/retry-save-to-db", async (req, res) => {
 		body: JSON.stringify(savingData),
 	});
 
+	client.release();
+
 	return res.json({
 		success: true,
 	});
@@ -144,6 +148,8 @@ app.post("/continue-save-to-db", async (req, res) => {
 		headers: { "Content-Type": "application/json" },
 		body: JSON.stringify({ ...savingData, uploadedRows }),
 	});
+
+	client.release();
 
 	return res.json({
 		success: true,
