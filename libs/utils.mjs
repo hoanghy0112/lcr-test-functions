@@ -5,8 +5,10 @@
 /* eslint-disable indent */
 /* eslint-disable require-jsdoc */
 /* eslint-disable object-curly-spacing */
-const { fields } = require("./constants");
-const { Pool } = require("pg");
+import { fields } from "./constants.mjs";
+import pg from "pg";
+
+const { Pool } = pg;
 
 function isNumber(value) {
 	return typeof value === "number" && !isNaN(value);
@@ -29,7 +31,7 @@ const parseToFloat = (value) => {
 	return typeof value === "number" ? value : 0;
 };
 
-function convertValueInSQL(value) {
+export function convertValueInSQL(value) {
 	if (value === null || value === undefined) {
 		return "null";
 	}
@@ -42,7 +44,7 @@ function convertValueInSQL(value) {
 	}
 }
 
-async function saveBatchToDb(
+export async function saveBatchToDb(
 	batch,
 	mappingConfig,
 	clientId,
@@ -147,7 +149,7 @@ function getSQLQuery(
 	return query;
 }
 
-async function sendErrorEmail(data) {
+export async function sendErrorEmail(data) {
 	return await fetch(
 		"https://netpartnerservices.retool.com/url/send-fail-to-save",
 		{
@@ -158,7 +160,7 @@ async function sendErrorEmail(data) {
 	);
 }
 
-async function getDbClient(url) {
+export async function getDbClient(url) {
 	console.log({ url });
 	const pool = new Pool({
 		connectionString: url,
@@ -174,10 +176,3 @@ async function getDbClient(url) {
 		throw error;
 	}
 }
-
-module.exports = {
-	getDbClient,
-	sendErrorEmail,
-	saveBatchToDb,
-	convertValueInSQL,
-};

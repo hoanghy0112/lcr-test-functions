@@ -5,7 +5,7 @@
 /* eslint-disable indent */
 /* eslint-disable require-jsdoc */
 /* eslint-disable object-curly-spacing */
-const fields = [
+export const fields = [
 	"account_id",
 	"order_id",
 	"email",
@@ -26,12 +26,6 @@ const fields = [
 	"notes",
 	"card_number",
 ];
-const RETRY_URL =
+export const RETRY_URL =
 	"https://us-central1-valiant-pager-451605-v0.cloudfunctions.net/uploadFile/save-to-db";
-const MAX_SAVING_BATCH_SIZE = 25000;
-
-module.exports = {
-	fields,
-	RETRY_URL,
-	MAX_SAVING_BATCH_SIZE,
-};
+export const MAX_SAVING_BATCH_SIZE = 25000;

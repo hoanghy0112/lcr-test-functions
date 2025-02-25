@@ -1,3 +1,5 @@
+/* eslint-disable prefer-const */
+/* eslint-disable operator-linebreak */
 /* eslint-disable no-constant-condition */
 /* eslint-disable max-len */
 /* eslint-disable new-cap */
@@ -6,39 +8,55 @@
 /* eslint-disable object-curly-spacing */
 /* eslint-disable no-tabs */
 /* eslint-disable indent */
-const functions = require("firebase-functions");
-const admin = require("firebase-admin");
-const express = require("express");
-const Busboy = require("busboy");
-const cors = require("cors");
-const { Storage } = require("@google-cloud/storage");
-const csv = require("csv-parser");
-const { Pool } = require("pg");
-const { writeFileSync } = require("fs");
+import functions from "firebase-functions";
+import admin from "firebase-admin";
+import express from "express";
+import Busboy from "busboy";
+import cors from "cors";
+import { Storage } from "@google-cloud/storage";
+import csv from "csv-parser";
+import pg from "pg";
+import { Connector } from "@google-cloud/cloud-sql-connector";
+import dotenv from "dotenv";
 
-require("dotenv").config();
-
-const {
+import {
 	saveBatchToDb,
 	sendErrorEmail,
 	getDbClient,
 	convertValueInSQL,
-} = require("./libs/utils");
+} from "./libs/utils.mjs";
 
-const { DATABASE_URL, RETOOL_DATABASE, CLOUD_SQL_DATABASE } = process.env;
+import { RETRY_URL, MAX_SAVING_BATCH_SIZE } from "./libs/constants.mjs";
 
-const { RETRY_URL, MAX_SAVING_BATCH_SIZE } = require("./libs/constants");
+dotenv.config();
+
+const { Pool } = pg;
+
+const {
+	RETOOL_DATABASE,
+	CLOUD_SQL_DATABASE,
+	DB_USER,
+	DB_PASSWORD,
+	DB_NAME,
+	DB_CONNECTION_NAME,
+} = process.env;
 
 admin.initializeApp();
 const app = express();
 const storage = new Storage();
 const bucket = storage.bucket("lcr-uploaded-files");
 
+const connector = new Connector();
+const clientOpts = await connector.getOptions({
+	instanceConnectionName: DB_CONNECTION_NAME,
+	ipType: "IAM",
+});
+
 const pool = new Pool({
-	connectionString: DATABASE_URL,
-	ssl: {
-		rejectUnauthorized: false,
-	},
+	...clientOpts,
+	user: DB_USER,
+	password: DB_PASSWORD,
+	database: DB_NAME,
 });
 
 app.use(cors()); // Default allows all origins (*)
@@ -172,6 +190,11 @@ app.post("/save-to-db", async (req, res) => {
 	const timezone = req.body.timezone;
 	const uploadedRows = req.body.uploadedRows ?? 0;
 
+	const results = { total: 0 };
+	const status = { count: 0 };
+	let BATCH_SIZE = defaultBatchSize;
+	let batch = [];
+
 	try {
 		await client.query(`
 			UPDATE uploading_files
@@ -183,11 +206,6 @@ app.post("/save-to-db", async (req, res) => {
 
 		const stream = file.createReadStream();
 		const csvStream = csv();
-
-		const results = { total: 0 };
-		const status = { count: 0 };
-		let BATCH_SIZE = defaultBatchSize;
-		let batch = [];
 
 		stream
 			.pipe(csvStream)
