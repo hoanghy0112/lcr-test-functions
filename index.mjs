@@ -49,7 +49,7 @@ const bucket = storage.bucket("lcr-uploaded-files");
 const connector = new Connector();
 const clientOpts = await connector.getOptions({
 	instanceConnectionName: DB_CONNECTION_NAME,
-	ipType: "IAM",
+	authType: "IAM",
 });
 
 const pool = new Pool({
@@ -537,4 +537,4 @@ process.on("SIGINT", async () => {
 	process.exit(0);
 });
 
-exports.uploadFile = functions.https.onRequest(app);
+export const uploadFile = functions.https.onRequest(app);
