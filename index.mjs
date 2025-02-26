@@ -305,7 +305,7 @@ app.post("/save-to-db", async (req, res) => {
 				`);
 				const isPause = uploadingFileRows[0]?.is_pause;
 
-				await client.query(`VACUUM ANALYZE transactions`);
+				await client.query(`ANALYZE transactions`);
 				if (!isPause) {
 					await client.query(`
 						UPDATE uploading_files
