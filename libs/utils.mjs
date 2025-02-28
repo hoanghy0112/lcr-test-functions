@@ -8,7 +8,8 @@
 import { fields } from "./constants.mjs";
 import pg from "pg";
 import { Storage } from "@google-cloud/storage";
-import { Readable } from "stream";
+import { Readable, pipeline } from "stream";
+import { from } from "pg-copy-streams";
 
 const storage = new Storage();
 
@@ -37,12 +38,12 @@ const parseToFloat = (value) => {
 
 export function convertValueInSQL(value) {
 	if (value === null || value === undefined) {
-		return "null";
+		return "";
 	}
 	if (isNumber(value)) {
 		return value || 0;
 	} else if (isNaN(value) && typeof value === "number") {
-		return "null";
+		return "";
 	} else {
 		return `'${value.replaceAll("'", "''")}'`;
 	}
@@ -59,9 +60,15 @@ export async function saveBatchToDb(
 	client,
 	stream
 ) {
-	// const stream = client.query(copyFrom('COPY test (title, description) FROM STDIN WITH (FORMAT text, DELIMITER \';\')'));
+	const copyStream = client.query(
+		from(
+			`COPY transactions (${fields.join(
+				","
+			)},client_id, file_name, global_terms_and_conditions, collection_fee, chargeback_fee) FROM STDIN WITH (FORMAT csv, DELIMITER ';', QUOTE '''')`
+		)
+	);
 
-	const query = getSQLQuery(
+	const data = getSQLQuery(
 		batch,
 		mappingConfig,
 		clientId,
@@ -70,13 +77,27 @@ export async function saveBatchToDb(
 		collectionFee,
 		chargebackFee
 	);
-	console.log({ size: batch.length, clientId, clientFileName });
 
 	try {
-		await client.query(query);
+		await new Promise((resolve, reject) => {
+			pipeline(Readable.from(data), copyStream, async (err) => {
+				if (err) {
+					console.error("Error copying data:", err);
+					reject(err);
+				} else {
+					await client.query(`
+						UPDATE uploading_files
+						SET uploaded_rows = uploaded_rows + ${batch.length}
+						WHERE client_id = ${clientId} AND file_name = '${clientFileName}';
+						`);
+					resolve();
+				}
+			});
+		});
 		return batch.length;
 	} catch (error) {
-		console.log({ error });
+		console.log({ error, msg: error?.message });
+		console.log({ data });
 		if (error.code != "53200") {
 			await client.query(`
                 UPDATE uploading_files
@@ -130,29 +151,25 @@ function getSQLQuery(
 	const placeholders = insertData
 		.map(
 			(rowData, rowIndex) =>
-				`(${rowData
+				`${rowData
 					.map((d, i) =>
 						convertValueInSQL(
 							fields[i] === "principal" ? parseToFloat(d) : d
 						)
 					)
-					.join(",")}, ${clientId}, ${convertValueInSQL(
+					.join(";")}; ${clientId}; ${convertValueInSQL(
 					clientFileName
-				)}, ${convertValueInSQL(additionalNotes)}, ${convertValueInSQL(
+				)}; ${convertValueInSQL(additionalNotes)}; ${convertValueInSQL(
 					collectionFee
-				)}, ${convertValueInSQL(chargebackFee)})`
+				)}; ${convertValueInSQL(chargebackFee)}`
 		)
-		.join(",");
+		.join("\n");
 
-	let query = `INSERT INTO transactions (${fields.join(
-		","
-	)}, client_id, file_name, global_terms_and_conditions, collection_fee, chargeback_fee) VALUES ${placeholders};`;
-	query += `
-    UPDATE uploading_files
-    SET uploaded_rows = uploaded_rows + ${batch.length}
-    WHERE client_id = ${clientId} AND file_name = '${clientFileName}';
-    `;
-	return query;
+	// let data = `INSERT INTO transactions (${fields.join(
+	// 	","
+	// )}, client_id, file_name, global_terms_and_conditions, collection_fee, chargeback_fee) VALUES ${};`;
+
+	return placeholders;
 }
 
 export async function sendErrorEmail(data) {

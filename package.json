@@ -18,7 +18,8 @@
     "firebase-admin": "^12.7.0",
     "firebase-functions": "^6.3.1",
     "multer": "^1.4.5-lts.1",
-    "pg": "^8.13.3"
+    "pg": "^8.13.3",
+    "pg-copy-streams": "^6.0.6"
   },
   "devDependencies": {
     "eslint": "^8.15.0",
