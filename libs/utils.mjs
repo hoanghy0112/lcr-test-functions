@@ -8,6 +8,7 @@
 import { fields } from "./constants.mjs";
 import pg from "pg";
 import { Storage } from "@google-cloud/storage";
+import { Readable } from "stream";
 
 const storage = new Storage();
 
@@ -58,6 +59,8 @@ export async function saveBatchToDb(
 	client,
 	stream
 ) {
+	// const stream = client.query(copyFrom('COPY test (title, description) FROM STDIN WITH (FORMAT text, DELIMITER \';\')'));
+
 	const query = getSQLQuery(
 		batch,
 		mappingConfig,
@@ -144,11 +147,11 @@ function getSQLQuery(
 	let query = `INSERT INTO transactions (${fields.join(
 		","
 	)}, client_id, file_name, global_terms_and_conditions, collection_fee, chargeback_fee) VALUES ${placeholders};`;
-	// query += `
-    // UPDATE uploading_files
-    // SET uploaded_rows = uploaded_rows + ${batch.length}
-    // WHERE client_id = ${clientId} AND file_name = '${clientFileName}';
-    // `;
+	query += `
+    UPDATE uploading_files
+    SET uploaded_rows = uploaded_rows + ${batch.length}
+    WHERE client_id = ${clientId} AND file_name = '${clientFileName}';
+    `;
 	return query;
 }
 

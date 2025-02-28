@@ -261,20 +261,20 @@ app.post("/save-to-db", async (req, res) => {
 							SELECT is_pause FROM uploading_files
 							WHERE client_id = ${clientId} AND file_name = '${clientFileName}';
 						`);
-						if (results.times % 20 == 0) {
-							await client.query(`
-								UPDATE uploading_files
-								SET uploaded_rows = ${results.total}
-								WHERE client_id = ${clientId} AND file_name = '${clientFileName}';
-							`)
-						}
+						// if (results.times % 20 == 0) {
+						// 	await client.query(`
+						// 		UPDATE uploading_files
+						// 		SET uploaded_rows = ${results.total}
+						// 		WHERE client_id = ${clientId} AND file_name = '${clientFileName}';
+						// 	`)
+						// }
 						const isPause = uploadingFileRows[0]?.is_pause;
 						if (isPause) {
-							await client.query(`
-								UPDATE uploading_files
-								SET uploaded_rows = ${results.total}
-								WHERE client_id = ${clientId} AND file_name = '${clientFileName}';
-							`)
+							// await client.query(`
+							// 	UPDATE uploading_files
+							// 	SET uploaded_rows = ${results.total}
+							// 	WHERE client_id = ${clientId} AND file_name = '${clientFileName}';
+							// `)
 							stream.destroy();
 							client.query("VACUUM ANALYZE transactions");
 							return;
