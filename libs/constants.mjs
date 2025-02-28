@@ -28,4 +28,4 @@ export const fields = [
 ];
 export const RETRY_URL =
 	"https://us-central1-valiant-pager-451605-v0.cloudfunctions.net/uploadFile/save-to-db";
-export const MAX_SAVING_BATCH_SIZE = 30000;
+export const MAX_SAVING_BATCH_SIZE = 1000;

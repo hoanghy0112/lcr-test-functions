@@ -207,7 +207,9 @@ app.post("/save-to-db", async (req, res) => {
 		const isFileExists = await checkFileExists(bucketName, fileName);
 		if (!isFileExists) {
 			console.log("Storage error: fail to find filename");
-			throw new Error("Storage error: Fail to load the file from Google Cloud Storage (the file was deleted in GCS)");
+			throw new Error(
+				"Storage error: Fail to load the file from Google Cloud Storage (the file was deleted in GCS)"
+			);
 		}
 
 		const file = bucket.file(fileName);
@@ -261,6 +263,7 @@ app.post("/save-to-db", async (req, res) => {
 						const isPause = uploadingFileRows[0]?.is_pause;
 						if (isPause) {
 							stream.destroy();
+							client.query("VACUUM ANALYZE transactions");
 							return;
 						}
 
@@ -309,7 +312,7 @@ app.post("/save-to-db", async (req, res) => {
 				if (!isPause) {
 					await client.query(`
 						UPDATE uploading_files
-						SET is_save_to_db_done = TRUE, max_rows = ${results.total}
+						SET is_save_to_db_done = TRUE
 						WHERE client_id = ${clientId} AND file_name = '${clientFileName}';
 					`);
 
