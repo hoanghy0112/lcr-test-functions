@@ -192,7 +192,7 @@ app.post("/save-to-db", async (req, res) => {
 	const timezone = req.body.timezone;
 	const uploadedRows = req.body.uploadedRows ?? 0;
 
-	const results = { total: 0 };
+	const results = { total: uploadedRows, times: 0 };
 	const status = { count: 0 };
 	let BATCH_SIZE = defaultBatchSize;
 	let batch = [];
@@ -228,6 +228,7 @@ app.post("/save-to-db", async (req, res) => {
 					if (batch.length >= BATCH_SIZE) {
 						stream.pause();
 						results.total += batch.length;
+						results.times += 1;
 						const copiedBatch = [...batch];
 						batch = [];
 						const newBatchSize = await saveBatchToDb(
@@ -257,11 +258,23 @@ app.post("/save-to-db", async (req, res) => {
 						});
 
 						const { rows: uploadingFileRows } = await client.query(`
-							SELECT * FROM uploading_files
+							SELECT is_pause FROM uploading_files
 							WHERE client_id = ${clientId} AND file_name = '${clientFileName}';
 						`);
+						if (results.times % 20 == 0) {
+							await client.query(`
+								UPDATE uploading_files
+								SET uploaded_rows = ${results.total}
+								WHERE client_id = ${clientId} AND file_name = '${clientFileName}';
+							`)
+						}
 						const isPause = uploadingFileRows[0]?.is_pause;
 						if (isPause) {
+							await client.query(`
+								UPDATE uploading_files
+								SET uploaded_rows = ${results.total}
+								WHERE client_id = ${clientId} AND file_name = '${clientFileName}';
+							`)
 							stream.destroy();
 							client.query("VACUUM ANALYZE transactions");
 							return;
@@ -312,7 +325,7 @@ app.post("/save-to-db", async (req, res) => {
 				if (!isPause) {
 					await client.query(`
 						UPDATE uploading_files
-						SET is_save_to_db_done = TRUE
+						SET is_save_to_db_done = TRUE, uploaded_rows = max_rows
 						WHERE client_id = ${clientId} AND file_name = '${clientFileName}';
 					`);
 
