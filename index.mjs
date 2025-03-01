@@ -105,102 +105,33 @@ app.post("/update-uploading-state", async (req, res) => {
 	return res.json({});
 });
 
-app.post("/retry-save-to-db", async (req, res) => {
+async function saveToDB(inputData) {
 	const client = await pool.connect();
 
-	const clientFileName = req.body.clientFileName;
-	const clientId = req.body.clientId;
-
-	await client.query(`
-		UPDATE uploading_files
-		SET error_msg = NULL, uploaded_rows = 0, last_sent_notification_email = NULL, last_upload_at = NOW()
-		WHERE client_id = ${clientId} AND file_name = '${clientFileName}';
-	`);
-	const result = await client.query(`
-		SELECT * FROM uploading_files
-		WHERE client_id = ${clientId} AND file_name = '${clientFileName}';
-	`);
-	const savingData = result.rows?.[0].saving_data;
-	console.log({ type: typeof savingData, savingData });
-
-	// await client.query(`
-	// 	DELETE FROM uploading_files
-	// 	WHERE client_id = ${clientId} AND file_name = '${clientFileName}';
-
-	// 	UPDATE uploading_files
-	// 	SET error_msg = NULL, uploaded_rows = 0, is_save_to_db_done = FALSE
-	// 	WHERE client_id = ${clientId} AND file_name = '${clientFileName}';
-	// `);
-
-	fetch(RETRY_URL, {
-		method: "POST",
-		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify(savingData),
-	});
-
-	client.release();
-
-	return res.json({
-		success: true,
-	});
-});
-
-app.post("/continue-save-to-db", async (req, res) => {
-	const client = await pool.connect();
-
-	const clientFileName = req.body.clientFileName;
-	const clientId = req.body.clientId;
-
-	await client.query(`
-		UPDATE uploading_files
-		SET is_pause = FALSE, last_upload_at = NOW()
-		WHERE client_id = ${clientId} AND file_name = '${clientFileName}';
-	`);
-	const result = await client.query(`
-		SELECT * FROM uploading_files
-		WHERE client_id = ${clientId} AND file_name = '${clientFileName}';
-	`);
-	const savingData = result.rows?.[0].saving_data;
-	const uploadedRows = result.rows?.[0].uploaded_rows;
-
-	fetch(RETRY_URL, {
-		method: "POST",
-		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify({ ...savingData, uploadedRows }),
-	});
-
-	client.release();
-
-	return res.json({
-		success: true,
-	});
-});
-
-app.post("/save-to-db", async (req, res) => {
-	const client = await pool.connect();
-
-	const clientFileName = req.body.clientFileName;
-	const clientId = req.body.clientId;
-	const fileName = req.body.fileName;
-	const mappingConfig = req.body.mappingConfig;
-	const additionalNotes = req.body.additionalNotes;
-	const collectionFee = req.body.collectionFee;
-	const chargebackFee = req.body.chargebackFee;
-	const defaultBatchSize = req.body.batchSize || 1000;
-	const startDate = req.body.startDate;
-	const receiver = req.body.receiver;
-	const timezone = req.body.timezone;
-	const uploadedRows = req.body.uploadedRows ?? 0;
+	const clientFileName = inputData.clientFileName;
+	const clientId = inputData.clientId;
+	const fileName = inputData.fileName;
+	const mappingConfig = inputData.mappingConfig;
+	const additionalNotes = inputData.additionalNotes;
+	const collectionFee = inputData.collectionFee;
+	const chargebackFee = inputData.chargebackFee;
+	const defaultBatchSize = inputData.batchSize || 1000;
+	const startDate = inputData.startDate;
+	const receiver = inputData.receiver;
+	const timezone = inputData.timezone;
+	const uploadedRows = inputData.uploadedRows ?? 0;
 
 	const results = { total: uploadedRows, times: 0 };
 	const status = { count: 0 };
 	let BATCH_SIZE = defaultBatchSize;
 	let batch = [];
 
+	let returnData = null;
+
 	try {
 		await client.query(`
 			UPDATE uploading_files
-			SET is_done = TRUE, saving_data = '${JSON.stringify(req.body)}'
+			SET is_done = TRUE, saving_data = '${JSON.stringify(inputData)}'
 			WHERE client_id = ${clientId} AND file_name = '${clientFileName}';
 		`);
 
@@ -347,7 +278,7 @@ app.post("/save-to-db", async (req, res) => {
 						}
 					);
 				}
-				res.json({ success: true, size: results.total });
+				returnData = { status: 200, success: true, size: results.total };
 			})
 			.on("error", async (error) => {
 				console.error("Error reading CSV file:", error);
@@ -362,7 +293,7 @@ app.post("/save-to-db", async (req, res) => {
 					reason: `[Fail to reading CSV file] ${error}`,
 				});
 				client.release();
-				res.status(500).json({ error: error.message });
+				returnData = { status: 500, error: error.message };
 			});
 	} catch (error) {
 		console.error("Error:", error);
@@ -382,8 +313,69 @@ app.post("/save-to-db", async (req, res) => {
 			reason: `[Unknown error] ${error?.message ?? ""}`,
 		});
 		client.release();
-		res.status(500).json({ error: error.message });
+		returnData = { status: 500, error: error.message };
 	}
+
+	return returnData;
+}
+
+app.post("/retry-save-to-db", async (req, res) => {
+	const client = await pool.connect();
+
+	const clientFileName = req.body.clientFileName;
+	const clientId = req.body.clientId;
+
+	await client.query(`
+		UPDATE uploading_files
+		SET error_msg = NULL, uploaded_rows = 0, last_sent_notification_email = NULL, last_upload_at = NOW()
+		WHERE client_id = ${clientId} AND file_name = '${clientFileName}';
+	`);
+	const result = await client.query(`
+		SELECT * FROM uploading_files
+		WHERE client_id = ${clientId} AND file_name = '${clientFileName}';
+	`);
+	const savingData = result.rows?.[0].saving_data;
+	console.log({ type: typeof savingData, savingData });
+
+	await saveToDB(savingData);
+
+	client.release();
+
+	return res.json({
+		success: true,
+	});
+});
+
+app.post("/continue-save-to-db", async (req, res) => {
+	const client = await pool.connect();
+
+	const clientFileName = req.body.clientFileName;
+	const clientId = req.body.clientId;
+
+	await client.query(`
+		UPDATE uploading_files
+		SET is_pause = FALSE, last_upload_at = NOW()
+		WHERE client_id = ${clientId} AND file_name = '${clientFileName}';
+	`);
+	const result = await client.query(`
+		SELECT * FROM uploading_files
+		WHERE client_id = ${clientId} AND file_name = '${clientFileName}';
+	`);
+	const savingData = result.rows?.[0].saving_data;
+	const uploadedRows = result.rows?.[0].uploaded_rows;
+
+	await saveToDB({ ...savingData, uploadedRows });
+
+	client.release();
+
+	return res.json({
+		success: true,
+	});
+});
+
+app.post("/save-to-db", async (req, res) => {
+	const responseData = await saveToDB(req.body);
+	return res.status(responseData.status).json(responseData ?? {});
 });
 
 app.post("/upload", async (req, res) => {
