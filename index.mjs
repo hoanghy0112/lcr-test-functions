@@ -337,9 +337,9 @@ app.post("/retry-save-to-db", async (req, res) => {
 	const savingData = result.rows?.[0].saving_data;
 	console.log({ type: typeof savingData, savingData });
 
-	await saveToDB(savingData);
-
 	client.release();
+
+	await saveToDB(savingData);
 
 	return res.json({
 		success: true,
@@ -364,9 +364,9 @@ app.post("/continue-save-to-db", async (req, res) => {
 	const savingData = result.rows?.[0].saving_data;
 	const uploadedRows = result.rows?.[0].uploaded_rows;
 
-	await saveToDB({ ...savingData, uploadedRows });
-
 	client.release();
+
+	await saveToDB({ ...savingData, uploadedRows });
 
 	return res.json({
 		success: true,
@@ -375,7 +375,7 @@ app.post("/continue-save-to-db", async (req, res) => {
 
 app.post("/save-to-db", async (req, res) => {
 	const responseData = await saveToDB(req.body);
-	return res.status(responseData.status).json(responseData ?? {});
+	return res.status(responseData?.status ?? 500).json(responseData ?? {});
 });
 
 app.post("/upload", async (req, res) => {
