@@ -38,12 +38,12 @@ const parseToFloat = (value) => {
 
 export function convertValueInSQL(value) {
 	if (value === null || value === undefined) {
-		return "";
+		return "null";
 	}
 	if (isNumber(value)) {
 		return value || 0;
 	} else if (isNaN(value) && typeof value === "number") {
-		return "";
+		return "null";
 	} else {
 		return `'${value.replaceAll("'", "''")}'`;
 	}
@@ -60,15 +60,15 @@ export async function saveBatchToDb(
 	client,
 	stream
 ) {
-	const copyStream = client.query(
-		from(
-			`COPY transactions (${fields.join(
-				","
-			)},client_id, file_name, global_terms_and_conditions, collection_fee, chargeback_fee) FROM STDIN WITH (FORMAT csv, DELIMITER ';', QUOTE '''')`
-		)
-	);
+	// const copyStream = client.query(
+	// 	from(
+	// 		`COPY transactions (${fields.join(
+	// 			","
+	// 		)},client_id, file_name, global_terms_and_conditions, collection_fee, chargeback_fee) FROM STDIN WITH (FORMAT csv, DELIMITER ';', QUOTE '''')`
+	// 	)
+	// );
 
-	const data = getSQLQuery(
+	const query = getSQLQuery(
 		batch,
 		mappingConfig,
 		clientId,
@@ -79,25 +79,26 @@ export async function saveBatchToDb(
 	);
 
 	try {
-		await new Promise((resolve, reject) => {
-			pipeline(Readable.from(data), copyStream, async (err) => {
-				if (err) {
-					console.error("Error copying data:", err);
-					reject(err);
-				} else {
-					await client.query(`
-						UPDATE uploading_files
-						SET uploaded_rows = uploaded_rows + ${batch.length}
-						WHERE client_id = ${clientId} AND file_name = '${clientFileName}';
-						`);
-					resolve();
-				}
-			});
-		});
+		// await new Promise((resolve, reject) => {
+		// 	pipeline(Readable.from(data), copyStream, async (err) => {
+		// 		if (err) {
+		// 			console.error("Error copying data:", err);
+		// 			reject(err);
+		// 		} else {
+		// 			await client.query(`
+		// 				UPDATE uploading_files
+		// 				SET uploaded_rows = uploaded_rows + ${batch.length}
+		// 				WHERE client_id = ${clientId} AND file_name = '${clientFileName}';
+		// 				`);
+		// 			resolve();
+		// 		}
+		// 	});
+		// });
+		await client.query(query);
 		return batch.length;
 	} catch (error) {
 		console.log({ error, msg: error?.message });
-		console.log({ data });
+		// console.log({ data });
 		if (error.code != "53200") {
 			await client.query(`
                 UPDATE uploading_files
@@ -151,25 +152,29 @@ function getSQLQuery(
 	const placeholders = insertData
 		.map(
 			(rowData, rowIndex) =>
-				`${rowData
+				`(${rowData
 					.map((d, i) =>
 						convertValueInSQL(
 							fields[i] === "principal" ? parseToFloat(d) : d
 						)
 					)
-					.join(";")}; ${clientId}; ${convertValueInSQL(
+					.join(",")}, ${clientId}, ${convertValueInSQL(
 					clientFileName
-				)}; ${convertValueInSQL(additionalNotes)}; ${convertValueInSQL(
+				)}, ${convertValueInSQL(additionalNotes)}, ${convertValueInSQL(
 					collectionFee
-				)}; ${convertValueInSQL(chargebackFee)}`
+				)}, ${convertValueInSQL(chargebackFee)})`
 		)
-		.join("\n");
+		.join(",");
 
-	// let data = `INSERT INTO transactions (${fields.join(
-	// 	","
-	// )}, client_id, file_name, global_terms_and_conditions, collection_fee, chargeback_fee) VALUES ${};`;
-
-	return placeholders;
+	let query = `INSERT INTO transactions (${fields.join(
+		","
+	)}, client_id, file_name, global_terms_and_conditions, collection_fee, chargeback_fee) VALUES ${placeholders};`;
+	query += `
+    UPDATE uploading_files
+    SET uploaded_rows = uploaded_rows + ${batch.length}
+    WHERE client_id = ${clientId} AND file_name = '${clientFileName}';
+    `;
+	return query;
 }
 
 export async function sendErrorEmail(data) {

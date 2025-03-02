@@ -129,12 +129,15 @@ async function saveToDB(inputData) {
 	let returnData = null;
 
 	try {
+		console.time("Save uploading state");
 		await client.query(`
 			UPDATE uploading_files
 			SET is_done = TRUE, saving_data = '${JSON.stringify(inputData)}'
 			WHERE client_id = ${clientId} AND file_name = '${clientFileName}';
 		`);
+		console.timeEnd("Save uploading state");
 
+		console.time("Get GCS file");
 		const isFileExists = await checkFileExists(bucketName, fileName);
 		if (!isFileExists) {
 			console.log("Storage error: fail to find filename");
@@ -144,9 +147,12 @@ async function saveToDB(inputData) {
 		}
 
 		const file = bucket.file(fileName);
+		console.timeEnd("Get GCS file");
 
 		const stream = file.createReadStream();
 		const csvStream = csv();
+		console.log(`Start read file: ${fileName}`);
+		console.log(`Batch size: ${BATCH_SIZE}`);
 
 		stream
 			.pipe(csvStream)
@@ -155,13 +161,19 @@ async function saveToDB(inputData) {
 					status.count += 1;
 					return;
 				}
+
+				if (batch.length % 1000 === 0) {
+					console.log(`1k batch rows: ${batch.length}`);
+				}
 				try {
 					if (batch.length >= BATCH_SIZE) {
+						console.log("Start to save a batch...");
 						stream.pause();
 						results.total += batch.length;
 						results.times += 1;
 						const copiedBatch = [...batch];
 						batch = [];
+						console.time("Save to batch");
 						const newBatchSize = await saveBatchToDb(
 							copiedBatch,
 							mappingConfig,
@@ -173,6 +185,8 @@ async function saveToDB(inputData) {
 							client,
 							stream
 						);
+						console.timeEnd("Save to batch");
+
 						// AIMD algorithm to optimize batch size
 						if (newBatchSize === BATCH_SIZE) {
 							BATCH_SIZE = Math.min(
@@ -188,28 +202,18 @@ async function saveToDB(inputData) {
 							BATCH_SIZE,
 						});
 
+						console.time("Check is pause");
 						const { rows: uploadingFileRows } = await client.query(`
 							SELECT is_pause FROM uploading_files
 							WHERE client_id = ${clientId} AND file_name = '${clientFileName}';
 						`);
-						// if (results.times % 20 == 0) {
-						// 	await client.query(`
-						// 		UPDATE uploading_files
-						// 		SET uploaded_rows = ${results.total}
-						// 		WHERE client_id = ${clientId} AND file_name = '${clientFileName}';
-						// 	`)
-						// }
 						const isPause = uploadingFileRows[0]?.is_pause;
 						if (isPause) {
-							// await client.query(`
-							// 	UPDATE uploading_files
-							// 	SET uploaded_rows = ${results.total}
-							// 	WHERE client_id = ${clientId} AND file_name = '${clientFileName}';
-							// `)
 							stream.destroy();
 							client.query("VACUUM ANALYZE transactions");
 							return;
 						}
+						console.timeEnd("Check is pause");
 
 						stream.resume();
 					}
@@ -352,17 +356,23 @@ app.post("/continue-save-to-db", async (req, res) => {
 	const clientFileName = req.body.clientFileName;
 	const clientId = req.body.clientId;
 
+	console.time("Update uploading files data");
 	await client.query(`
 		UPDATE uploading_files
 		SET is_pause = FALSE, last_upload_at = NOW()
 		WHERE client_id = ${clientId} AND file_name = '${clientFileName}';
 	`);
+	console.timeEnd("Update uploading files data");
+	console.time("Get uploading data");
 	const result = await client.query(`
 		SELECT * FROM uploading_files
 		WHERE client_id = ${clientId} AND file_name = '${clientFileName}';
 	`);
+	console.timeEnd("Get uploading data");
 	const savingData = result.rows?.[0].saving_data;
-	const uploadedRows = result.rows?.[0].uploaded_rows;
+	const uploadedRows = parseInt(result.rows?.[0].uploaded_rows);
+
+	console.log({ uploadedRows, data: savingData });
 
 	client.release();
 
