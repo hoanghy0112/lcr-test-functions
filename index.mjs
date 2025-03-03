@@ -106,76 +106,132 @@ app.post("/update-uploading-state", async (req, res) => {
 });
 
 async function saveToDB(inputData) {
-	const client = await pool.connect();
+	return await new Promise(async (resolve, reject) => {
+		const client = await pool.connect();
 
-	const clientFileName = inputData.clientFileName;
-	const clientId = inputData.clientId;
-	const fileName = inputData.fileName;
-	const mappingConfig = inputData.mappingConfig;
-	const additionalNotes = inputData.additionalNotes;
-	const collectionFee = inputData.collectionFee;
-	const chargebackFee = inputData.chargebackFee;
-	const defaultBatchSize = inputData.batchSize || 1000;
-	const startDate = inputData.startDate;
-	const receiver = inputData.receiver;
-	const timezone = inputData.timezone;
-	const uploadedRows = inputData.uploadedRows ?? 0;
+		const clientFileName = inputData.clientFileName;
+		const clientId = inputData.clientId;
+		const fileName = inputData.fileName;
+		const mappingConfig = inputData.mappingConfig;
+		const additionalNotes = inputData.additionalNotes;
+		const collectionFee = inputData.collectionFee;
+		const chargebackFee = inputData.chargebackFee;
+		const defaultBatchSize = inputData.batchSize || 1000;
+		const startDate = inputData.startDate;
+		const receiver = inputData.receiver;
+		const timezone = inputData.timezone;
+		const uploadedRows = inputData.uploadedRows ?? 0;
 
-	const results = { total: uploadedRows, times: 0 };
-	const status = { count: 0 };
-	let BATCH_SIZE = defaultBatchSize;
-	let batch = [];
+		const results = { total: uploadedRows, times: 0 };
+		const status = { count: 0 };
+		let BATCH_SIZE = defaultBatchSize;
+		let batch = [];
 
-	let returnData = null;
-
-	try {
-		console.time("Save uploading state");
-		await client.query(`
+		try {
+			console.time("Save uploading state");
+			await client.query(`
 			UPDATE uploading_files
 			SET is_done = TRUE, saving_data = '${JSON.stringify(inputData)}'
 			WHERE client_id = ${clientId} AND file_name = '${clientFileName}';
 		`);
-		console.timeEnd("Save uploading state");
+			console.timeEnd("Save uploading state");
 
-		console.time("Get GCS file");
-		const isFileExists = await checkFileExists(bucketName, fileName);
-		if (!isFileExists) {
-			console.log("Storage error: fail to find filename");
-			throw new Error(
-				"Storage error: Fail to load the file from Google Cloud Storage (the file was deleted in GCS)"
-			);
-		}
+			console.time("Get GCS file");
+			const isFileExists = await checkFileExists(bucketName, fileName);
+			if (!isFileExists) {
+				console.log("Storage error: fail to find filename");
+				throw new Error(
+					"Storage error: Fail to load the file from Google Cloud Storage (the file was deleted in GCS)"
+				);
+			}
 
-		const file = bucket.file(fileName);
-		console.timeEnd("Get GCS file");
+			const file = bucket.file(fileName);
+			console.timeEnd("Get GCS file");
 
-		const stream = file.createReadStream();
-		const csvStream = csv();
-		console.log(`Start read file: ${fileName}`);
-		console.log(`Batch size: ${BATCH_SIZE}`);
+			const stream = file.createReadStream();
+			const csvStream = csv();
+			console.log(`Start read file: ${fileName}`);
+			console.log(`Batch size: ${BATCH_SIZE}`);
 
-		stream
-			.pipe(csvStream)
-			.on("data", async (row) => {
-				if (status.count < uploadedRows) {
-					status.count += 1;
-					return;
-				}
+			stream
+				.pipe(csvStream)
+				.on("data", async (row) => {
+					if (status.count < uploadedRows) {
+						status.count += 1;
+						return;
+					}
+					try {
+						if (batch.length >= BATCH_SIZE) {
+							stream.pause();
+							results.total += batch.length;
+							results.times += 1;
+							const copiedBatch = [...batch];
+							batch = [];
+							console.time("Save to batch");
+							const newBatchSize = await saveBatchToDb(
+								copiedBatch,
+								mappingConfig,
+								clientId,
+								clientFileName,
+								additionalNotes,
+								collectionFee,
+								chargebackFee,
+								client,
+								stream
+							);
+							console.timeEnd("Save to batch");
 
-				if (batch.length % 1000 === 0) {
-					console.log(`1k batch rows: ${batch.length}`);
-				}
-				try {
-					if (batch.length >= BATCH_SIZE) {
-						console.log("Start to save a batch...");
-						stream.pause();
+							// AIMD algorithm to optimize batch size
+							if (newBatchSize === BATCH_SIZE) {
+								BATCH_SIZE = Math.min(
+									BATCH_SIZE * 1.2,
+									MAX_SAVING_BATCH_SIZE
+								);
+							} else BATCH_SIZE = newBatchSize;
+
+							console.log({
+								total: results.total,
+								clientId,
+								clientFileName,
+								BATCH_SIZE,
+							});
+
+							console.time("Check is pause");
+							const { rows: uploadingFileRows } = await client.query(`
+							SELECT is_pause FROM uploading_files
+							WHERE client_id = ${clientId} AND file_name = '${clientFileName}';
+						`);
+							const isPause = uploadingFileRows[0]?.is_pause;
+							if (isPause) {
+								stream.destroy();
+								client.query("VACUUM ANALYZE transactions");
+								return;
+							}
+							console.timeEnd("Check is pause");
+
+							stream.resume();
+						}
+						batch.push(row);
+					} catch (error) {
+						await sendErrorEmail({
+							filename: clientFileName,
+							clientId,
+							totalRows: results.total,
+							doneAt: new Date().getTime(),
+							createdAt: startDate,
+							receiver,
+							timezone,
+							reason: `[Fail to reading CSV file] ${error}`,
+						});
+					}
+				})
+				.on("end", async () => {
+					console.log("CSV processing completed");
+					if (batch.length > 0) {
 						results.total += batch.length;
-						results.times += 1;
-						const copiedBatch = [...batch];
-						batch = [];
-						console.time("Save to batch");
-						const newBatchSize = await saveBatchToDb(
-							copiedBatch,
+
+						await saveBatchToDb(
+							[...batch],
 							mappingConfig,
 							clientId,
 							clientFileName,
@@ -185,40 +241,45 @@ async function saveToDB(inputData) {
 							client,
 							stream
 						);
-						console.timeEnd("Save to batch");
-
-						// AIMD algorithm to optimize batch size
-						if (newBatchSize === BATCH_SIZE) {
-							BATCH_SIZE = Math.min(
-								BATCH_SIZE * 1.2,
-								MAX_SAVING_BATCH_SIZE
-							);
-						} else BATCH_SIZE = newBatchSize;
-
-						console.log({
-							total: results.total,
-							clientId,
-							clientFileName,
-							BATCH_SIZE,
-						});
-
-						console.time("Check is pause");
-						const { rows: uploadingFileRows } = await client.query(`
-							SELECT is_pause FROM uploading_files
-							WHERE client_id = ${clientId} AND file_name = '${clientFileName}';
-						`);
-						const isPause = uploadingFileRows[0]?.is_pause;
-						if (isPause) {
-							stream.destroy();
-							client.query("VACUUM ANALYZE transactions");
-							return;
-						}
-						console.timeEnd("Check is pause");
-
-						stream.resume();
+						batch = [];
 					}
-					batch.push(row);
-				} catch (error) {
+
+					const { rows: uploadingFileRows } = await client.query(`
+					SELECT * FROM uploading_files
+					WHERE client_id = ${clientId} AND file_name = '${clientFileName}';
+				`);
+					const isPause = uploadingFileRows[0]?.is_pause;
+
+					await client.query(`VACUUM ANALYZE transactions`);
+					if (!isPause) {
+						await client.query(`
+						UPDATE uploading_files
+						SET is_save_to_db_done = TRUE, uploaded_rows = max_rows
+						WHERE client_id = ${clientId} AND file_name = '${clientFileName}';
+					`);
+
+						client.release();
+						await fetch(
+							"https://netpartnerservices.retool.com/url/send-email",
+							{
+								method: "POST",
+								headers: { "Content-Type": "application/json" },
+								body: JSON.stringify({
+									filename: clientFileName,
+									clientId,
+									totalRows: results.total,
+									doneAt: new Date().getTime(),
+									createdAt: startDate,
+									receiver,
+									timezone,
+								}),
+							}
+						);
+					}
+					resolve({ status: 200, success: true, size: results.total });
+				})
+				.on("error", async (error) => {
+					console.error("Error reading CSV file:", error);
 					await sendErrorEmail({
 						filename: clientFileName,
 						clientId,
@@ -229,98 +290,30 @@ async function saveToDB(inputData) {
 						timezone,
 						reason: `[Fail to reading CSV file] ${error}`,
 					});
-				}
-			})
-			.on("end", async () => {
-				console.log("CSV processing completed");
-				if (batch.length > 0) {
-					results.total += batch.length;
-
-					await saveBatchToDb(
-						[...batch],
-						mappingConfig,
-						clientId,
-						clientFileName,
-						additionalNotes,
-						collectionFee,
-						chargebackFee,
-						client,
-						stream
-					);
-					batch = [];
-				}
-
-				const { rows: uploadingFileRows } = await client.query(`
-					SELECT * FROM uploading_files
-					WHERE client_id = ${clientId} AND file_name = '${clientFileName}';
-				`);
-				const isPause = uploadingFileRows[0]?.is_pause;
-
-				await client.query(`VACUUM ANALYZE transactions`);
-				if (!isPause) {
-					await client.query(`
-						UPDATE uploading_files
-						SET is_save_to_db_done = TRUE, uploaded_rows = max_rows
-						WHERE client_id = ${clientId} AND file_name = '${clientFileName}';
-					`);
-
 					client.release();
-					await fetch(
-						"https://netpartnerservices.retool.com/url/send-email",
-						{
-							method: "POST",
-							headers: { "Content-Type": "application/json" },
-							body: JSON.stringify({
-								filename: clientFileName,
-								clientId,
-								totalRows: results.total,
-								doneAt: new Date().getTime(),
-								createdAt: startDate,
-								receiver,
-								timezone,
-							}),
-						}
-					);
-				}
-				returnData = { status: 200, success: true, size: results.total };
-			})
-			.on("error", async (error) => {
-				console.error("Error reading CSV file:", error);
-				await sendErrorEmail({
-					filename: clientFileName,
-					clientId,
-					totalRows: results.total,
-					doneAt: new Date().getTime(),
-					createdAt: startDate,
-					receiver,
-					timezone,
-					reason: `[Fail to reading CSV file] ${error}`,
+					resolve({ status: 500, error: error.message });
 				});
-				client.release();
-				returnData = { status: 500, error: error.message };
-			});
-	} catch (error) {
-		console.error("Error:", error);
-		await client.query(`
+		} catch (error) {
+			console.error("Error:", error);
+			await client.query(`
 			UPDATE uploading_files
 			SET error_msg = '${error?.message ?? JSON.stringify(error)}'
 			WHERE client_id = ${clientId} AND file_name = '${clientFileName}';
 		`);
-		await sendErrorEmail({
-			filename: clientFileName,
-			clientId,
-			totalRows: results.total,
-			doneAt: new Date().getTime(),
-			createdAt: startDate,
-			receiver,
-			timezone,
-			reason: `[Unknown error] ${error?.message ?? ""}`,
-		});
-		client.release();
-		returnData = { status: 500, error: error.message };
-	}
-
-	return returnData;
+			await sendErrorEmail({
+				filename: clientFileName,
+				clientId,
+				totalRows: results.total,
+				doneAt: new Date().getTime(),
+				createdAt: startDate,
+				receiver,
+				timezone,
+				reason: `[Unknown error] ${error?.message ?? ""}`,
+			});
+			client.release();
+			resolve({ status: 500, error: error.message });
+		}
+	});
 }
 
 app.post("/retry-save-to-db", async (req, res) => {
